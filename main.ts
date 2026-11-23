@@ -6,13 +6,17 @@
 // 18 Nov -2.79%. Unfiltered dip-buyers bleed out on those falling days —
 // offline replays lose $30 to $135 there, mostly by re-entering every dip of
 // a falling market and eating one stop-loss after another. So this bot only
-// buys dips while the 240-bar trend is up, and otherwise sits in cash:
+// buys dips while the trend is up, and otherwise sits in cash. The first
+// version filtered on the close vs 240 bars ago; the revision filters on the
+// close vs its 120-bar simple moving average instead, and lets winners run
+// up to 360 bars. The SMA filter is stricter on the way down: on the four
+// falling windows it takes no losing trade at all (it sits out entirely),
+// while the 240-bar filter still loses $0.26 to $14.23 there:
 //
 //   Entry: close down >= 0.8% over the last 30 bars AND an uptick (close
-//          above the previous bar's close) AND (fewer than 240 bars seen,
-//          or the close above the close 240 bars ago), full cash, one
-//          position at a time.
-//   Exit:  +3.0% from the fill price, or -1.2%, or 240 bars held.
+//          above the previous bar's close) AND close above its 120-bar
+//          SMA, full cash, one position at a time.
+//   Exit:  +3.0% from the fill price, or -1.2%, or 360 bars held.
 //          Sells the whole position. No trailing stop.
 //   max_slippage_bps 300 on every order (the dev window's biggest
 //   1-minute open-vs-previous-close gap is 0.2%, so fills are never
@@ -21,13 +25,16 @@
 // Offline replay of the same rules on all five published windows (same fill
 // model as the kit: next-open fills, 4 bps fee, 2 bps slippage,
 // constant-product impact against the bar's open depth):
-//   23 Nov dev: +$33.46, 3 round trips (6 fills), max drawdown 0.95%
-//   13 Nov:     -$14.23 | 15 Nov: -$0.26 | 17 Nov: +$0.02 | 18 Nov: -$1.39
-// Worst window -$14.23, sum over the five windows +$17.60. For comparison,
-// buy-and-hold on the dev window makes +$32.33 but loses $51.01 on 13 Nov
-// and $43.47 on 15 Nov, and the unfiltered version of this same dip rule
-// loses $80.75 on 15 Nov. The trend filter is what keeps the downside
-// bounded while the uptrend entries still capture the climb.
+//   23 Nov dev: +$27.29, 1 round trip (2 fills), max drawdown 0.95%
+//   13 Nov:     +$0.00 (no trades) | 15 Nov: +$0.00 (no trades)
+//   17 Nov:     +$0.02 | 18 Nov: +$0.00 (no trades)
+// Worst window $0.00, sum over the five windows +$27.31. The previous
+// version (240-bar filter, 240-bar hold) made +$33.46 on dev but lost
+// $14.23 on 13 Nov and summed only +$17.60 — this revision gives up
+// $6.17 of dev PnL for a worst case of zero and a higher mean across
+// all five windows (+$5.46 vs +$3.52), which is what the unseen live
+// window rewards. For comparison, buy-and-hold on the dev window makes
+// +$32.33 but loses $51.01 on 13 Nov and $43.47 on 15 Nov.
 //
 // Deterministic: float64 arithmetic on the closes alone, no clock, no
 // environment, no randomness. Every run on the same bars gives the same
@@ -39,13 +46,13 @@ const SYMBOL = 'CBBTC';
 /** Lookback for the dip: close down this much over N bars. */
 const N_BARS = 30;
 const DIP = 0.008;
-/** Trend filter lookback: the close must be above the close this many bars ago. */
-const TREND_BARS = 240;
+/** Trend filter lookback: the close must be above its simple moving average over this many bars. */
+const TREND_BARS = 120;
 /** Take profit / stop loss, as a fraction of the fill price. */
 const TAKE_PROFIT = 0.03;
 const STOP_LOSS = 0.012;
 /** Maximum bars to hold a position. */
-const MAX_HOLD_BARS = 240;
+const MAX_HOLD_BARS = 360;
 const MAX_SLIPPAGE_BPS = 300;
 
 /** Closes seen so far, in price-scale units (1e5 per USDC). */
@@ -60,7 +67,12 @@ function entryReason(close: number): string | null {
   if (i < 1 || close <= closes[i - 1]) return null; // needs an uptick
   if (i < N_BARS) return null;
   if (close / closes[i - N_BARS] - 1 > -DIP) return null; // not dipped enough
-  if (i >= TREND_BARS && close <= closes[i - TREND_BARS]) return null; // trend down
+  // Trend filter: close above its TREND_BARS simple moving average
+  // (average of the last TREND_BARS closes, current bar included).
+  const n = Math.min(closes.length, TREND_BARS);
+  let sum = 0;
+  for (let j = closes.length - n; j < closes.length; j++) sum += closes[j];
+  if (close <= sum / n) return null; // trend down or flat
   return 'dip+uptick+uptrend';
 }
 
